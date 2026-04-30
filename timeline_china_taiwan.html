@@ -258,6 +258,66 @@
   .detail-sections h3 { font-size: 14px; color: #1f1f1f; margin: 16px 0 6px; border-bottom: 1px solid #e0dbd0; padding-bottom: 4px; }
   .detail-sections p  { margin: 0 0 12px; }
 
+  /* 縮放控制列 */
+  .zoom-bar {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 0;
+    background: #1f1f1f;
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.3);
+    z-index: 50;
+    overflow: hidden;
+  }
+  .zoom-btn {
+    background: none;
+    border: none;
+    color: #f5f2ec;
+    font-size: 20px;
+    width: 40px;
+    height: 40px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background .15s;
+    flex-shrink: 0;
+  }
+  .zoom-btn:hover  { background: rgba(255,255,255,.12); }
+  .zoom-btn:active { background: rgba(255,255,255,.22); }
+  .zoom-btn:disabled { opacity: .3; cursor: default; }
+  .zoom-pips {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px;
+    border-left: 1px solid rgba(255,255,255,.12);
+    border-right: 1px solid rgba(255,255,255,.12);
+  }
+  .zoom-pip {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: rgba(255,255,255,.3);
+    cursor: pointer;
+    transition: background .15s, transform .15s;
+  }
+  .zoom-pip.active {
+    background: #c9a24a;
+    transform: scale(1.3);
+  }
+  .zoom-label {
+    color: #c9a24a;
+    font-size: 12px;
+    font-weight: 700;
+    min-width: 32px;
+    text-align: center;
+    padding: 0 6px;
+  }
+
   footer {
     padding: 12px 28px 28px;
     font-size: 12px;
@@ -290,9 +350,17 @@
 </div>
 
 <footer>
-  滑鼠移至事件條可看摘要；點擊可開啟詳情面板。時間軸可左右捲動。
+  滑鼠移至事件條可看摘要；點擊可開啟詳情面板。Ctrl＋滾輪或觸控板縮放可縮放時間軸。
   <strong>朝鮮半島</strong>通道顯示 1948 年分裂前的整體史，斜線區為分裂後。
 </footer>
+
+<!-- 縮放控制列 -->
+<div class="zoom-bar" id="zoomBar">
+  <button class="zoom-btn" id="zoomOut" title="縮小">－</button>
+  <div class="zoom-pips" id="zoomPips"></div>
+  <span class="zoom-label" id="zoomLabel">1×</span>
+  <button class="zoom-btn" id="zoomIn" title="放大">＋</button>
+</div>
 
 <script>
 // ── 資料內嵌（來源：data/events-data.js，未來接後台後改為 fetch）──
@@ -401,15 +469,27 @@ const EVENTS_DATA = {
 
 <script>
 // ═══════════════════════════════════════════════════════════════
+//  縮放層級定義
+// ═══════════════════════════════════════════════════════════════
+const ZOOM_LEVELS = [
+  { pxPerYear: 3.5, major: 50, minor: 25, minWeight: 5, label: '¼×' },
+  { pxPerYear: 7,   major: 20, minor: 10, minWeight: 4, label: '½×' },
+  { pxPerYear: 14,  major: 10, minor: 5,  minWeight: 3, label: '1×'  },
+  { pxPerYear: 28,  major: 5,  minor: 1,  minWeight: 2, label: '2×'  },
+  { pxPerYear: 56,  major: 2,  minor: 1,  minWeight: 1, label: '4×'  },
+];
+let currentZoom   = 2;   // 預設 1×
+let currentPxPerYear = ZOOM_LEVELS[currentZoom].pxPerYear;
+
+// ═══════════════════════════════════════════════════════════════
 //  常數
 // ═══════════════════════════════════════════════════════════════
-const PX_PER_YEAR  = 14;
-const ROW_HEIGHT   = 30;   // px：每一事件列的高度
-const LANE_PAD_TOP = 8;    // px：lane 頂部留白
-const LANE_PAD_BOT = 8;    // px：lane 底部留白
-const AXIS_HEIGHT  = 60;   // px
-const LABEL_WIDTH  = 130;  // px：左側國家標籤寬度
-const LABEL_PAD    = 10;   // px：timeline 右側多留白
+const ROW_HEIGHT   = 30;
+const LANE_PAD_TOP = 8;
+const LANE_PAD_BOT = 8;
+const AXIS_HEIGHT  = 60;
+const LABEL_WIDTH  = 130;
+const LABEL_PAD    = 20;
 
 const START_YEAR = Math.min(
   EVENTS_DATA.meta.startYear,
@@ -418,37 +498,23 @@ const START_YEAR = Math.min(
 const END_YEAR = EVENTS_DATA.meta.endYear;
 
 function yearToX(y) {
-  return (y - START_YEAR) * PX_PER_YEAR;
+  return (y - START_YEAR) * currentPxPerYear;
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  工具：自動分配 row（貪婪區間排程）
+//  工具：自動分配 row
 // ═══════════════════════════════════════════════════════════════
 function assignRows(events) {
-  // 先依 start 排序，start 相同則 end 較大的先排（讓長事件佔較低 row）
   const sorted = [...events].sort((a, b) =>
     a.start !== b.start ? a.start - b.start : b.end - a.end
   );
-  const rowEnds = []; // rowEnds[i] = 該 row 目前最後一個事件的 end year
+  const rowEnds = [];
   return sorted.map(ev => {
-    const trackEnd = Math.max(ev.end, ev.start + 1); // 單點事件至少佔 1 年
+    const trackEnd = Math.max(ev.end, ev.start + 1);
     let r = rowEnds.findIndex(e => e <= ev.start);
     if (r === -1) r = rowEnds.length;
     rowEnds[r] = trackEnd;
     return { ...ev, _row: r };
-  });
-}
-
-// ═══════════════════════════════════════════════════════════════
-//  建立圖例
-// ═══════════════════════════════════════════════════════════════
-function buildLegend() {
-  const el = document.getElementById('legend');
-  EVENTS_DATA.categories.forEach(cat => {
-    const item = document.createElement('div');
-    item.className = 'legend-item';
-    item.innerHTML = `<span class="swatch" style="background:${cat.color}"></span>${cat.label}`;
-    el.appendChild(item);
   });
 }
 
@@ -465,13 +531,27 @@ function injectCategoryStyles() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  建立刻度軸
+//  建立圖例
 // ═══════════════════════════════════════════════════════════════
-function buildAxis(container) {
+function buildLegend() {
+  const el = document.getElementById('legend');
+  EVENTS_DATA.categories.forEach(cat => {
+    const item = document.createElement('div');
+    item.className = 'legend-item';
+    item.innerHTML = `<span class="swatch" style="background:${cat.color}"></span>${cat.label}`;
+    el.appendChild(item);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  建立刻度軸（依縮放層級調整間隔）
+// ═══════════════════════════════════════════════════════════════
+function buildAxis(container, major, minor) {
   const axis = document.createElement('div');
   axis.className = 'axis';
-  for (let y = START_YEAR; y <= END_YEAR; y += 5) {
-    const isMajor = y % 10 === 0;
+  const firstTick = Math.ceil(START_YEAR / minor) * minor;
+  for (let y = firstTick; y <= END_YEAR; y += minor) {
+    const isMajor = y % major === 0;
     const tick = document.createElement('div');
     tick.className = 'tick ' + (isMajor ? 'major' : 'minor');
     tick.style.left = yearToX(y) + 'px';
@@ -490,10 +570,11 @@ function buildAxis(container) {
 // ═══════════════════════════════════════════════════════════════
 //  在 lane 加格線
 // ═══════════════════════════════════════════════════════════════
-function addGridlines(lane) {
-  for (let y = START_YEAR; y <= END_YEAR; y += 5) {
+function addGridlines(lane, major, minor) {
+  const firstTick = Math.ceil(START_YEAR / minor) * minor;
+  for (let y = firstTick; y <= END_YEAR; y += minor) {
     const g = document.createElement('div');
-    g.className = 'gridline' + (y % 10 === 0 ? ' major' : '');
+    g.className = 'gridline' + (y % major === 0 ? ' major' : '');
     g.style.left = yearToX(y) + 'px';
     lane.appendChild(g);
   }
@@ -510,16 +591,14 @@ function renderEvent(lane, ev) {
   const el = document.createElement('div');
   el.className = 'event cat-' + ev.cat;
   el.style.left  = yearToX(clampStart) + 'px';
-  el.style.width = (spanYears * PX_PER_YEAR) + 'px';
+  el.style.width = (spanYears * currentPxPerYear) + 'px';
   el.style.top   = (LANE_PAD_TOP + ev._row * ROW_HEIGHT) + 'px';
 
-  // 事件文字
   const text = document.createElement('span');
   text.className = 'event-text';
   text.textContent = ev.title;
   el.appendChild(text);
 
-  // Tooltip（hover 顯示 descBrief）
   const tip = document.createElement('div');
   tip.className = 'tooltip';
   const range = ev.start === ev.end ? `${ev.start}` : `${ev.start} – ${ev.end}`;
@@ -530,9 +609,7 @@ function renderEvent(lane, ev) {
   `;
   el.appendChild(tip);
 
-  // 點擊開詳情面板
   el.addEventListener('click', () => openPanel(ev));
-
   lane.appendChild(el);
 }
 
@@ -552,110 +629,93 @@ function openPanel(ev) {
   const range = ev.start === ev.end ? `${ev.start}` : `${ev.start} – ${ev.end}`;
   panelTitle.textContent = ev.title;
   panelRange.textContent = range;
-
   panelBody.innerHTML = `
     <div class="detail-brief">${ev.descBrief}</div>
-    ${ev.hasDetail
-      ? `<button class="detail-load-btn" id="loadDetailBtn">▼ 閱讀詳細內容</button>`
-      : ''}
+    ${ev.hasDetail ? `<button class="detail-load-btn" id="loadDetailBtn">▼ 閱讀詳細內容</button>` : ''}
     <div class="detail-sections" id="detailSections"></div>
   `;
-
   if (ev.hasDetail) {
-    document.getElementById('loadDetailBtn').addEventListener('click', () => {
-      loadDetail(ev.id);
-    });
+    document.getElementById('loadDetailBtn').addEventListener('click', () => loadDetail(ev.id));
   }
-
   panel.classList.add('open');
 }
 
 function loadDetail(eventId) {
   const btn = document.getElementById('loadDetailBtn');
   const sections = document.getElementById('detailSections');
-  if (btn) btn.disabled = true;
-  if (btn) btn.textContent = '載入中…';
-
+  if (btn) { btn.disabled = true; btn.textContent = '載入中…'; }
   fetch(`data/details/${eventId}.json`)
-    .then(r => {
-      if (!r.ok) throw new Error('無法載入');
-      return r.json();
-    })
+    .then(r => { if (!r.ok) throw new Error(); return r.json(); })
     .then(data => {
       if (btn) btn.remove();
-      sections.innerHTML = data.sections
-        .map(s => `<h3>${s.title}</h3><p>${s.content}</p>`)
-        .join('');
+      sections.innerHTML = data.sections.map(s => `<h3>${s.title}</h3><p>${s.content}</p>`).join('');
     })
     .catch(() => {
-      if (btn) btn.textContent = '⚠ 載入失敗（需透過本地伺服器開啟）';
-      if (btn) btn.disabled = false;
+      if (btn) { btn.textContent = '⚠ 載入失敗（需透過本地伺服器開啟）'; btn.disabled = false; }
     });
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  主流程：建立時間軸
+//  建立時間軸（可傳入 minWeight 過濾事件）
 // ═══════════════════════════════════════════════════════════════
-function buildTimeline() {
+function buildTimeline(minWeight) {
   const { regions, events } = EVENTS_DATA;
+  const zl = ZOOM_LEVELS[currentZoom];
   const timeline = document.getElementById('timeline');
+  timeline.innerHTML = '';
+
+  // 更新 header 說明
+  document.querySelector('header p').textContent =
+    `${START_YEAR} 年 — ${END_YEAR} 年 · 由左至右 · 大刻度每 ${zl.major} 年，小刻度每 ${zl.minor} 年`;
 
   // 設定 timeline 寬度
-  const totalPx = yearToX(END_YEAR) + LABEL_PAD;
-  timeline.style.width  = (LABEL_WIDTH + totalPx) + 'px';
+  timeline.style.width      = (LABEL_WIDTH + yearToX(END_YEAR) + LABEL_PAD) + 'px';
   timeline.style.paddingLeft = LABEL_WIDTH + 'px';
 
-  // 依 region 分組，只取 visible: true
+  // 依 region 分組，過濾 visible + weight
   const byRegion = {};
   regions.forEach(r => { byRegion[r.id] = []; });
-  events.filter(e => e.visible).forEach(e => {
-    if (byRegion[e.region] !== undefined) byRegion[e.region].push(e);
-  });
+  events
+    .filter(e => e.visible && e.weight >= minWeight)
+    .forEach(e => { if (byRegion[e.region] !== undefined) byRegion[e.region].push(e); });
 
   // 自動分配 row，計算 lane 高度
   const assigned = {};
   const laneH    = {};
   regions.forEach(r => {
     assigned[r.id] = assignRows(byRegion[r.id]);
-    const maxRow = assigned[r.id].length > 0
-      ? Math.max(...assigned[r.id].map(e => e._row))
-      : 0;
+    const maxRow = assigned[r.id].length > 0 ? Math.max(...assigned[r.id].map(e => e._row)) : 0;
     laneH[r.id] = LANE_PAD_TOP + (maxRow + 1) * ROW_HEIGHT + LANE_PAD_BOT;
   });
 
   // 建立刻度軸
-  buildAxis(timeline);
+  buildAxis(timeline, zl.major, zl.minor);
 
   // 建立各 region 的 label + lane
   let currentTop = AXIS_HEIGHT;
   regions.forEach(r => {
     const h = laneH[r.id];
 
-    // 國家標籤
     const label = document.createElement('div');
     label.className = 'country-label';
     label.style.top        = currentTop + 'px';
     label.style.height     = h + 'px';
     label.style.background = r.color;
-    label.textContent = r.label;
+    label.textContent      = r.label;
     timeline.appendChild(label);
 
-    // Lane
     const lane = document.createElement('div');
     lane.className = 'lane';
     lane.id = 'lane-' + r.id;
     lane.style.height = h + 'px';
 
-    // 各 region 特殊樣式
     if (r.id === 'kr') {
       lane.classList.add('lane-kr');
-      // 1948 後斜線底紋
       const ended = document.createElement('div');
       ended.className = 'kr-ended';
       ended.style.left  = yearToX(1948) + 'px';
       ended.style.right = '0';
       lane.appendChild(ended);
-      // 分裂標記線
       const marker = document.createElement('div');
       marker.className = 'split-marker';
       marker.style.left = yearToX(1948) + 'px';
@@ -670,23 +730,109 @@ function buildTimeline() {
       lane.classList.add('lane-nk');
     }
 
-    addGridlines(lane);
+    addGridlines(lane, zl.major, zl.minor);
     assigned[r.id].forEach(ev => renderEvent(lane, ev));
     timeline.appendChild(lane);
-
     currentTop += h;
   });
 
-  // timeline 總高度
   timeline.style.height = currentTop + 'px';
 }
+
+// ═══════════════════════════════════════════════════════════════
+//  縮放核心：保持 pivotX 對應的年份不動
+// ═══════════════════════════════════════════════════════════════
+const wrapper = document.querySelector('.timeline-wrapper');
+
+function applyZoom(newZoomIdx, pivotScreenX) {
+  if (newZoomIdx < 0 || newZoomIdx >= ZOOM_LEVELS.length) return;
+
+  // 記住 pivot 對應的年份
+  const scrollLeft = wrapper.scrollLeft;
+  const yearAtPivot = (scrollLeft + pivotScreenX - LABEL_WIDTH) / currentPxPerYear + START_YEAR;
+
+  // 切換縮放
+  currentZoom      = newZoomIdx;
+  currentPxPerYear = ZOOM_LEVELS[newZoomIdx].pxPerYear;
+
+  // 重新渲染
+  buildTimeline(ZOOM_LEVELS[currentZoom].minWeight);
+
+  // 還原 scroll，讓 yearAtPivot 維持在 pivotScreenX 位置
+  const newScrollLeft = (yearAtPivot - START_YEAR) * currentPxPerYear + LABEL_WIDTH - pivotScreenX;
+  wrapper.scrollLeft = Math.max(0, newScrollLeft);
+
+  updateZoomUI();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  縮放 UI 更新
+// ═══════════════════════════════════════════════════════════════
+function updateZoomUI() {
+  document.getElementById('zoomLabel').textContent = ZOOM_LEVELS[currentZoom].label;
+  document.getElementById('zoomIn').disabled  = currentZoom >= ZOOM_LEVELS.length - 1;
+  document.getElementById('zoomOut').disabled = currentZoom <= 0;
+
+  // 更新小圓點
+  document.querySelectorAll('.zoom-pip').forEach((pip, i) => {
+    pip.classList.toggle('active', i === currentZoom);
+  });
+}
+
+function initZoomUI() {
+  const pips = document.getElementById('zoomPips');
+  ZOOM_LEVELS.forEach((_, i) => {
+    const pip = document.createElement('div');
+    pip.className = 'zoom-pip' + (i === currentZoom ? ' active' : '');
+    pip.title = ZOOM_LEVELS[i].label;
+    pip.addEventListener('click', () => {
+      const rect = wrapper.getBoundingClientRect();
+      applyZoom(i, rect.width / 2);
+    });
+    pips.appendChild(pip);
+  });
+
+  // 按鈕
+  document.getElementById('zoomIn').addEventListener('click', () => {
+    const rect = wrapper.getBoundingClientRect();
+    applyZoom(currentZoom + 1, rect.width / 2);
+  });
+  document.getElementById('zoomOut').addEventListener('click', () => {
+    const rect = wrapper.getBoundingClientRect();
+    applyZoom(currentZoom - 1, rect.width / 2);
+  });
+
+  updateZoomUI();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  滾輪 / Pinch 縮放（Ctrl + 滾輪 或 觸控板 Pinch）
+// ═══════════════════════════════════════════════════════════════
+// PINCH_THRESHOLD：累積多少 deltaY 才跳一個層級，數字越大越不靈敏
+const PINCH_THRESHOLD = 30;
+let pinchAccum = 0;
+
+wrapper.addEventListener('wheel', (e) => {
+  if (!e.ctrlKey) return; // 無 Ctrl → 正常橫向捲動
+  e.preventDefault();
+
+  pinchAccum += e.deltaY;
+
+  if (Math.abs(pinchAccum) >= PINCH_THRESHOLD) {
+    const rect = wrapper.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    applyZoom(pinchAccum < 0 ? currentZoom + 1 : currentZoom - 1, mouseX);
+    pinchAccum = 0; // 跳完一級後重新累積
+  }
+}, { passive: false });
 
 // ═══════════════════════════════════════════════════════════════
 //  啟動
 // ═══════════════════════════════════════════════════════════════
 injectCategoryStyles();
 buildLegend();
-buildTimeline();
+buildTimeline(ZOOM_LEVELS[currentZoom].minWeight);
+initZoomUI();
 </script>
 </body>
 </html>
